@@ -117,7 +117,7 @@ windows = { version = "0.62", features = [
 windows-sys = { version = "0.61", features = ["Win32_System_LibraryLoader"] }
 winreg = "0.56"
 skrifa = "0.42"
-harfrust = "0.10"
+harfrust = "0.12"
 hypher = "0.1.7"
 icu_normalizer = { version = "2.2", default-features = false, features = ["compiled_data"] }
 icu_properties = "2.2"
