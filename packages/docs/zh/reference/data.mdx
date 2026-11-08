@@ -17,7 +17,7 @@ icon: 'database'
 
 项目默认位于 `Documents/Koharu/<project-name>.khrproj/`，包含交替写入的持久状态文件、项目打开期间的锁文件，以及保存源图、生成画面和手动栅格编辑的内容寻址 blob。未被引用的 blob 不会自动移除，因此大量编辑过的项目可能随时间增大。
 
-如需保存到其他位置，请在 `~/.koharu/config.toml` 的 `[projects]` 下设置 `root`，例如 `root = "D:/Manga/Koharu"`。请使用带正斜杠的绝对路径（或单引号）；开头的 `~` 会解析为主目录。Koharu 会在创建第一个项目时创建该目录，且只在启动时读取一次设置，因此修改后请重启。已有项目不会被移动：请在关闭 Koharu 后把 `.khrproj` 目录复制到新的根目录。
+如需保存到其他位置，请在 `~/.koharu/config.toml` 的 `[projects]` 下设置 `root`，例如 `root = "D:/Manga/Koharu"`。请使用带正斜杠的绝对路径（或单引号）；开头的 `~` 会解析为主目录。Koharu 会在创建第一个项目时创建该目录，且只在启动时读取一次设置，因此修改后请重启。`[projects]` 中的无效设置（如相对路径或未知键）会导致 Koharu 无法启动。已有项目不会被移动：请在关闭 Koharu 后把 `.khrproj` 目录复制到新的根目录。
 
 <Warning>项目打开时不要修改内部文件。在项目列表中删除会永久移除整个目录。</Warning>
 

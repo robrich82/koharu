@@ -177,7 +177,7 @@ pub(crate) struct CurrentProject {
 
 /// Location of the project library, stored under `[projects]` in
 /// `~/.koharu/config.toml`.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct ProjectsConfig {
     /// Directory holding `*.khrproj` projects. Absolute, with a leading `~`
@@ -186,7 +186,6 @@ pub(crate) struct ProjectsConfig {
 }
 
 impl ProjectsConfig {
-    /// The directory itself is created with the first project.
     fn resolve_root(&self) -> Result<PathBuf> {
         let Some(root) = &self.root else {
             return Ok(dirs::document_dir()
@@ -201,7 +200,8 @@ impl ProjectsConfig {
         };
         if root.is_relative() {
             bail!(
-                "`[projects] root` in the configuration file must be an absolute path, got {}",
+                "`[projects] root` in {} must be an absolute path, got {}",
+                koharu_config::path()?.display(),
                 root.display()
             );
         }
@@ -209,6 +209,8 @@ impl ProjectsConfig {
     }
 }
 
+/// Projects live directly under `root`, which is created with the first
+/// project rather than at startup.
 #[derive(Clone)]
 pub(crate) struct ProjectLibrary {
     root: PathBuf,
@@ -225,7 +227,14 @@ impl ProjectLibrary {
     pub(crate) fn list(&self) -> Result<Vec<ProjectSummary>> {
         let entries = match std::fs::read_dir(&self.root) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            // A root that does not exist yet is an empty library, unless its parent is
+            // missing too: that is an unplugged drive or a mistyped path, not a new library.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && self.root.parent().is_none_or(|parent| parent.is_dir()) =>
+            {
+                return Ok(Vec::new());
+            }
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("failed to read {}", self.root.display()));
@@ -1399,31 +1408,37 @@ mod tests {
     #[test]
     fn a_relative_or_empty_root_is_rejected() {
         for root in ["projects", ""] {
-            let error = resolve_root(Some(root)).expect_err("relative root");
-            assert!(error.to_string().contains("[projects] root"), "{error}");
+            assert!(resolve_root(Some(root)).is_err(), "{root:?}");
         }
     }
 
     #[test]
-    fn an_unset_root_defaults_to_koharu_in_documents() {
-        match dirs::document_dir() {
-            Some(documents) => assert_eq!(
-                resolve_root(None).expect("default"),
-                documents.join("Koharu")
-            ),
-            None => assert!(resolve_root(None).is_err()),
-        }
+    fn an_unknown_projects_key_is_rejected() {
+        assert!(serde_json::from_str::<ProjectsConfig>(r#"{"rooot": "/Manga"}"#).is_err());
     }
 
     #[test]
-    fn the_library_lists_projects_under_its_root_and_tolerates_a_missing_one() {
+    fn a_root_that_does_not_exist_yet_is_an_empty_library() {
         let directory = tempfile::tempdir().expect("temporary directory");
-        let missing = ProjectLibrary {
+        let library = ProjectLibrary {
             root: directory.path().join("not-created-yet"),
         };
-        assert!(missing.list().expect("empty").is_empty());
-        assert!(!missing.root.exists());
+        assert!(library.list().expect("empty").is_empty());
+        assert!(!library.root.exists());
+    }
 
+    #[test]
+    fn a_root_whose_parent_is_missing_is_an_error() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let library = ProjectLibrary {
+            root: directory.path().join("unplugged").join("Koharu"),
+        };
+        assert!(library.list().is_err());
+    }
+
+    #[test]
+    fn the_library_lists_projects_under_its_root() {
+        let directory = tempfile::tempdir().expect("temporary directory");
         let project = directory.path().join("My Project.khrproj");
         std::fs::create_dir(&project).expect("project directory");
         std::fs::write(project.join("state-a.khr"), []).expect("state file");
@@ -1437,6 +1452,17 @@ mod tests {
             .map(|project| project.name)
             .collect::<Vec<_>>();
         assert_eq!(names, ["My Project"]);
+    }
+
+    #[tokio::test]
+    async fn creating_a_project_creates_a_missing_root() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let root = directory.path().join("Koharu");
+        let library = ProjectLibrary { root: root.clone() };
+
+        library.create("My Project").await.expect("created");
+
+        assert!(root.join("My Project.khrproj").is_dir());
     }
 
     #[test]
