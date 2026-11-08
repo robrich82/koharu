@@ -15,7 +15,9 @@ icon: 'database'
 
 ## Project data
 
-Projects live at `Documents/Koharu/<project-name>.khrproj/`, or under `[projects] root` in `~/.koharu/config.toml` when set. The root must be an absolute path (a leading `~` resolves to your home directory), is created when missing, and is read once at startup, so restart Koharu after changing it. Existing projects are not moved; copy the `.khrproj` directories into the new root while Koharu is closed. Each contains alternating durable state files, a lock file while the project is open, and content-addressed blobs for source images, generated artwork, and authored raster edits. Unreferenced blobs are not removed automatically, so a heavily edited project can grow over time.
+Projects live at `Documents/Koharu/<project-name>.khrproj/` by default. Each contains alternating durable state files, a lock file while the project is open, and content-addressed blobs for source images, generated artwork, and authored raster edits. Unreferenced blobs are not removed automatically, so a heavily edited project can grow over time.
+
+To keep them elsewhere, set `root` under `[projects]` in `~/.koharu/config.toml`, for example `root = "D:/Manga/Koharu"`. Use an absolute path with forward slashes (or single quotes); a leading `~` resolves to your home directory. Koharu creates the directory with the first project and reads the setting once at startup, so restart after changing it. Existing projects are not moved; copy the `.khrproj` directories into the new root while Koharu is closed.
 
 <Warning>
   Do not change internal project files while the project is open. Deletion from the project browser

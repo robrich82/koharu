@@ -178,57 +178,60 @@ pub(crate) struct CurrentProject {
 /// Location of the project library, stored under `[projects]` in
 /// `~/.koharu/config.toml`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct ProjectsConfig {
     /// Directory holding `*.khrproj` projects. Absolute, with a leading `~`
     /// accepted for the home directory. Defaults to `<Documents>/Koharu`.
     pub(crate) root: Option<PathBuf>,
 }
 
-#[derive(Clone)]
-pub(crate) struct ProjectLibrary {
-    config: koharu_config::Config<ProjectsConfig>,
-}
-
-impl ProjectLibrary {
-    pub(crate) fn new() -> Result<Self> {
-        Ok(Self {
-            config: koharu_config::load("projects")?,
-        })
-    }
-
-    /// Resolves the configured root without touching the filesystem. The
-    /// configuration file is read once per process, so an edited root applies
-    /// at the next launch; a root changed in process applies to the following
-    /// operation.
-    fn configured_root(&self) -> Result<PathBuf> {
-        let root = match self.config.read()?.root.clone() {
-            Some(root) => expand_home(root)?,
-            None => dirs::document_dir()
-                .context("the Documents directory is unavailable")?
-                .join("Koharu"),
+impl ProjectsConfig {
+    /// The directory itself is created with the first project.
+    fn resolve_root(&self) -> Result<PathBuf> {
+        let Some(root) = &self.root else {
+            return Ok(dirs::document_dir()
+                .context("the Documents directory is unavailable; set `[projects] root` in the configuration file")?
+                .join("Koharu"));
+        };
+        let root = match root.strip_prefix("~") {
+            Ok(rest) => dirs::home_dir()
+                .context("could not determine the home directory for `[projects] root`")?
+                .join(rest),
+            Err(_) => root.clone(),
         };
         if root.is_relative() {
             bail!(
-                "the configured project root {} must be an absolute path",
+                "`[projects] root` in the configuration file must be an absolute path, got {}",
                 root.display()
             );
         }
         Ok(root)
     }
+}
 
-    /// Resolves the configured root, creating it on demand.
-    fn root(&self) -> Result<PathBuf> {
-        let root = self.configured_root()?;
-        std::fs::create_dir_all(&root)
-            .with_context(|| format!("failed to create {}", root.display()))?;
-        Ok(root)
+#[derive(Clone)]
+pub(crate) struct ProjectLibrary {
+    root: PathBuf,
+}
+
+impl ProjectLibrary {
+    pub(crate) fn new() -> Result<Self> {
+        let config = koharu_config::load::<ProjectsConfig>("projects")?;
+        Ok(Self {
+            root: config.read()?.resolve_root()?,
+        })
     }
 
     pub(crate) fn list(&self) -> Result<Vec<ProjectSummary>> {
-        let root = self.root()?;
-        let mut projects = std::fs::read_dir(&root)
-            .with_context(|| format!("failed to read {}", root.display()))?
+        let entries = match std::fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read {}", self.root.display()));
+            }
+        };
+        let mut projects = entries
             .filter_map(|entry| entry.ok())
             .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
             .filter_map(|entry| {
@@ -283,17 +286,8 @@ impl ProjectLibrary {
 
     fn resolve(&self, name: &str) -> Result<(String, PathBuf)> {
         let name = validate_project_name(name)?;
-        Ok((name.clone(), self.root()?.join(format!("{name}.khrproj"))))
+        Ok((name.clone(), self.root.join(format!("{name}.khrproj"))))
     }
-}
-
-/// Expands a leading `~` so hand-written configuration can stay portable.
-fn expand_home(path: PathBuf) -> Result<PathBuf> {
-    let Ok(rest) = path.strip_prefix("~") else {
-        return Ok(path);
-    };
-    let home = dirs::home_dir().context("could not determine the home directory")?;
-    Ok(home.join(rest))
 }
 
 pub(crate) struct Project {
@@ -1381,75 +1375,68 @@ mod tests {
 
     use super::*;
 
+    fn resolve_root(root: Option<&str>) -> Result<PathBuf> {
+        ProjectsConfig {
+            root: root.map(PathBuf::from),
+        }
+        .resolve_root()
+    }
+
     #[test]
-    fn a_leading_tilde_resolves_against_the_home_directory() {
+    fn a_configured_root_accepts_an_absolute_path_or_a_leading_tilde() {
         let home = dirs::home_dir().expect("home directory");
         assert_eq!(
-            expand_home(PathBuf::from("~/Manga")).expect("expanded"),
+            resolve_root(Some("~/Manga")).expect("tilde"),
             home.join("Manga")
         );
         let absolute = home.join("Elsewhere");
-        assert_eq!(expand_home(absolute.clone()).expect("unchanged"), absolute);
+        assert_eq!(
+            resolve_root(Some(absolute.to_str().expect("utf-8"))).expect("absolute"),
+            absolute
+        );
     }
 
-    /// A library backed by an in-memory configuration, so root resolution can
-    /// be exercised without the shared `~/.koharu/config.toml`.
-    fn library(root: Option<PathBuf>) -> ProjectLibrary {
-        ProjectLibrary {
-            config: ProjectsConfig { root }.into(),
+    #[test]
+    fn a_relative_or_empty_root_is_rejected() {
+        for root in ["projects", ""] {
+            let error = resolve_root(Some(root)).expect_err("relative root");
+            assert!(error.to_string().contains("[projects] root"), "{error}");
         }
     }
 
     #[test]
-    fn an_unset_root_falls_back_to_the_documents_directory() {
-        let Some(documents) = dirs::document_dir() else {
-            return;
+    fn an_unset_root_defaults_to_koharu_in_documents() {
+        match dirs::document_dir() {
+            Some(documents) => assert_eq!(
+                resolve_root(None).expect("default"),
+                documents.join("Koharu")
+            ),
+            None => assert!(resolve_root(None).is_err()),
+        }
+    }
+
+    #[test]
+    fn the_library_lists_projects_under_its_root_and_tolerates_a_missing_one() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let missing = ProjectLibrary {
+            root: directory.path().join("not-created-yet"),
         };
-        assert_eq!(
-            library(None).configured_root().expect("resolved"),
-            documents.join("Koharu")
-        );
-    }
+        assert!(missing.list().expect("empty").is_empty());
+        assert!(!missing.root.exists());
 
-    #[test]
-    fn a_configured_root_expands_a_leading_tilde() {
-        let home = dirs::home_dir().expect("home directory");
-        assert_eq!(
-            library(Some(PathBuf::from("~/Manga")))
-                .configured_root()
-                .expect("resolved"),
-            home.join("Manga")
-        );
-    }
-
-    #[test]
-    fn a_relative_root_is_rejected() {
-        let error = library(Some(PathBuf::from("projects")))
-            .configured_root()
-            .expect_err("relative root");
-        assert!(error.to_string().contains("must be an absolute path"));
-    }
-
-    #[test]
-    fn a_configured_root_is_created_on_demand() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let root = directory.path().join("library").join("Koharu");
-        let library = library(Some(root.clone()));
-        assert!(!root.exists());
-
-        assert_eq!(library.root().expect("resolved"), root);
-        assert!(root.is_dir());
-    }
-
-    #[test]
-    fn projects_resolve_below_the_configured_root() {
-        let directory = tempfile::tempdir().expect("temporary directory");
-        let library = library(Some(directory.path().to_path_buf()));
-
-        let (name, path) = library.resolve("My Project").expect("resolved");
-
-        assert_eq!(name, "My Project");
-        assert_eq!(path, directory.path().join("My Project.khrproj"));
+        let project = directory.path().join("My Project.khrproj");
+        std::fs::create_dir(&project).expect("project directory");
+        std::fs::write(project.join("state-a.khr"), []).expect("state file");
+        let library = ProjectLibrary {
+            root: directory.path().to_path_buf(),
+        };
+        let names = library
+            .list()
+            .expect("listed")
+            .into_iter()
+            .map(|project| project.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["My Project"]);
     }
 
     #[test]
